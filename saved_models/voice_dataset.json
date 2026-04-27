@@ -1,0 +1,62 @@
+{
+  "Danilo Cordoba": {
+    "pitch_hz": 88.80000000000001,
+    "armonicos": [
+      {
+        "orden": 1,
+        "frecuencia_hz": 88.80000000000001,
+        "amplitud_rel": 1.0
+      },
+      {
+        "orden": 2,
+        "frecuencia_hz": 178.0,
+        "amplitud_rel": 0.42333854385963177
+      },
+      {
+        "orden": 3,
+        "frecuencia_hz": 266.40000000000003,
+        "amplitud_rel": 0.19653415863786353
+      },
+      {
+        "orden": 4,
+        "frecuencia_hz": 357.20000000000005,
+        "amplitud_rel": 0.10073644032195998
+      },
+      {
+        "orden": 5,
+        "frecuencia_hz": 444.6,
+        "amplitud_rel": 0.09991651985962303
+      }
+    ]
+  },
+  "Michel Guarnizo": {
+    "pitch_hz": 175.38984533137736,
+    "armonicos": [
+      {
+        "orden": 1,
+        "frecuencia_hz": 175.38984533137736,
+        "amplitud_rel": 1.0
+      },
+      {
+        "orden": 2,
+        "frecuencia_hz": 360.8370301931771,
+        "amplitud_rel": 0.4287618396404278
+      },
+      {
+        "orden": 3,
+        "frecuencia_hz": 534.6329353184707,
+        "amplitud_rel": 0.2191187994728476
+      },
+      {
+        "orden": 4,
+        "frecuencia_hz": 690.8672868457616,
+        "amplitud_rel": 0.08662314778549668
+      },
+      {
+        "orden": 5,
+        "frecuencia_hz": 890.4201372481257,
+        "amplitud_rel": 0.042136218877267345
+      }
+    ]
+  }
+}

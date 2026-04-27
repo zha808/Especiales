@@ -1,0 +1,194 @@
+EXPLICACION MATEMATICA DEL PROCESO DE IDENTIFICACION DE VOZ
+
+Este documento describe el pipeline matematico usado en el proyecto,
+desde la entrada de audio hasta la identificacion final del usuario.
+
+============================================================
+1) ENTRADA DE LA SENAL
+============================================================
+
+Hay dos fuentes posibles:
+
+A) Microfono (grabacion directa):
+   - Se captura una senal discreta x[n] con frecuencia de muestreo Fs.
+   - n = 0, 1, ..., N-1.
+
+B) Archivo WAV:
+   - Se lee x_raw[n].
+   - Si el WAV tiene varios canales, se convierte a mono por promedio:
+
+       x_mono[n] = (1/C) * sum_{c=1..C} x_c[n]
+
+   - Si el archivo no esta en Fs objetivo, se remuestrea.
+
+
+============================================================
+2) PREPROCESAMIENTO
+============================================================
+
+2.1) Eliminacion de componente DC (centrado)
+
+Se resta la media para quitar offset:
+
+    mu = (1/N) * sum_{n=0..N-1} x[n]
+    x1[n] = x[n] - mu
+
+2.2) Normalizacion de amplitud
+
+Se divide por el valor maximo absoluto para estabilizar la escala:
+
+    A = max_n |x1[n]|
+    x2[n] = x1[n] / A   (si A > 0)
+
+Con esto, la senal queda aproximadamente en [-1, 1].
+
+
+============================================================
+3) VENTANEO Y FFT
+============================================================
+
+3.1) Ventana de Hann
+
+Antes de la FFT se aplica una ventana w[n] para reducir fuga espectral:
+
+    xw[n] = x2[n] * w[n]
+
+La Hann tipica es:
+
+    w[n] = 0.5 - 0.5*cos(2*pi*n/(N-1))
+
+3.2) Transformada rapida de Fourier (rFFT)
+
+Para senales reales se usa rFFT, que calcula solo frecuencias no negativas:
+
+    X[k] = sum_{n=0..N-1} xw[n] * exp(-j*2*pi*k*n/N)
+
+Frecuencia asociada al bin k:
+
+    f_k = k * Fs / N
+
+3.3) Espectro de magnitud
+
+    M[k] = |X[k]|
+
+En tu implementacion se normaliza por suma de ventana:
+
+    M_norm[k] = M[k] / (sum_n w[n] + eps)
+
+
+============================================================
+4) ESTIMACION DE PITCH (F0)
+============================================================
+
+Se busca la fundamental en un rango de voz humana, por ejemplo:
+
+    f in [80, 350] Hz
+
+Pasos:
+
+1. Se filtran bins en ese rango.
+2. Se detectan picos locales en magnitud.
+3. Se define un umbral relativo:
+
+       umbral = max(0.15 * max(M_rango), 1e-8)
+
+4. Si hay picos, se toma el de mayor magnitud.
+5. Si no hay picos, se usa el maximo global del rango.
+
+Resultado:
+
+    F0 estimada = frecuencia del pico elegido.
+
+
+============================================================
+5) EXTRACCION DE ARMONICOS
+============================================================
+
+Para orden m = 1..H (por ejemplo H=5), el armonico ideal esta en:
+
+    f_m,ideal = m * F0
+
+Como en audio real hay desviaciones, se busca el maximo local en una banda:
+
+    [f_m,ideal - delta_m, f_m,ideal + delta_m]
+
+Donde delta_m depende de resolucion espectral y del orden m.
+
+Se obtiene para cada armonico:
+- frecuencia observada f_m
+- amplitud observada a_m
+
+
+============================================================
+6) NORMALIZACION DE ARMONICOS (ROBUSTEZ)
+============================================================
+
+Para reducir sensibilidad al volumen/distancia al microfono,
+se usan amplitudes relativas respecto al primer armonico:
+
+    r_m = a_m / a_1
+
+Asi el perfil no depende tanto de ganancia absoluta.
+
+
+============================================================
+7) CONSTRUCCION DEL VECTOR DE CARACTERISTICAS
+============================================================
+
+Para comparar voces, se construye un vector numerico:
+
+    v = [F0/300, r_1, r_2, ..., r_H]
+
+Notas:
+- F0 se divide por 300 para llevarla a una escala parecida a r_m.
+- Si falta algun armonico, su componente puede quedar en 0.
+
+
+============================================================
+8) METRICA DE COMPARACION ENTRE VOCES
+============================================================
+
+Se usa distancia euclidea entre vectores:
+
+    d(v, u) = sqrt( sum_i (v_i - u_i)^2 )
+
+Interpretacion:
+- d pequena => perfiles parecidos
+- d grande  => perfiles diferentes
+
+
+============================================================
+9) DECISION FINAL DE IDENTIFICACION
+============================================================
+
+Dado un perfil de prueba v_test y perfiles registrados {u_j}:
+
+1. Se calcula d_j = d(v_test, u_j) para cada usuario j.
+2. Se elige el mejor candidato:
+
+       j* = argmin_j d_j
+
+3. Se compara contra un umbral T (por ejemplo T=0.35):
+
+   - Si d_{j*} <= T: se identifica al usuario j*
+   - Si d_{j*} >  T: no hay confianza suficiente
+
+
+============================================================
+10) RESUMEN MATEMATICO EN UNA LINEA
+============================================================
+
+x[n] -> centrar/normalizar -> ventana Hann -> FFT -> |X(f)|
+-> estimar F0 -> extraer armonicos -> amplitudes relativas
+-> vector de caracteristicas -> distancia euclidea -> decision por umbral
+
+
+============================================================
+11) LIMITACIONES MATEMATICAS IMPORTANTES
+============================================================
+
+- El pitch y armonicos pueden cambiar por emocion, salud, postura, ruido.
+- La FFT sobre una sola toma es sensible a contenido fonetico (que palabra se dijo).
+- El metodo usa pocas caracteristicas, por lo que no es biometria de alta seguridad.
+- Para mejorar: promediar varias tomas por usuario, VAD, filtrado de ruido,
+  y caracteristicas adicionales (MFCC, embebidos de speaker recognition, etc.).
