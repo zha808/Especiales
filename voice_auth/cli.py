@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import argparse
 import sys
-from pathlib import Path
+
+import numpy as np
 
 from .audio import cargar_audio_wav, grabar_audio
 from .features import extraer_caracteristicas
+from .keywords import contiene_palabra_clave, transcribir_audio
 from .matching import mejor_coincidencia
-from .storage import DEFAULT_DATASET_PATH, cargar_dataset, guardar_dataset
+from .storage import DatabaseError, cargar_dataset, guardar_usuario
+
+
+PALABRA_CLAVE_POR_DEFECTO = "ábrete"
 
 
 def _pedir_texto(mensaje: str, default: str | None = None) -> str:
@@ -47,7 +52,7 @@ def _pedir_int(mensaje: str, default: int) -> int:
             print("Entrada invalida. Debes escribir un numero entero.")
 
 
-def _obtener_audio(duracion: float, sample_rate: int, audio_file: str | None) -> object:
+def _obtener_audio(duracion: float, sample_rate: int, audio_file: str | None) -> np.ndarray:
     """Obtiene audio desde microfono por defecto o desde un archivo WAV."""
     if audio_file is not None and audio_file.strip() != "":
         # Permite pegar rutas entre comillas desde el explorador/terminal.
@@ -82,13 +87,11 @@ def ejecutar_modo_interactivo() -> None:
             duracion = _pedir_float("Duracion de grabacion (segundos)", 4.0)
             sample_rate = _pedir_int("Sample rate (Hz)", 16000)
             audio_file = _pedir_texto("Ruta archivo WAV (opcional, Enter para microfono)", "")
-            dataset_str = _pedir_texto("Ruta del dataset", str(DEFAULT_DATASET_PATH))
 
             registrar_usuario(
                 usuario=usuario,
                 duracion=duracion,
                 sample_rate=sample_rate,
-                dataset_path=Path(dataset_str),
                 audio_file=audio_file,
             )
         elif opcion == "2":
@@ -96,13 +99,13 @@ def ejecutar_modo_interactivo() -> None:
             umbral = _pedir_float("Umbral de verificacion", 0.35)
             sample_rate = _pedir_int("Sample rate (Hz)", 16000)
             audio_file = _pedir_texto("Ruta archivo WAV (opcional, Enter para microfono)", "")
-            dataset_str = _pedir_texto("Ruta del dataset", str(DEFAULT_DATASET_PATH))
+            palabra_clave = _pedir_texto("Palabra clave esperada", PALABRA_CLAVE_POR_DEFECTO)
 
             verificar_identidad(
                 duracion=duracion,
                 sample_rate=sample_rate,
-                dataset_path=Path(dataset_str),
                 umbral=umbral,
+                palabra_clave=palabra_clave,
                 audio_file=audio_file,
             )
         elif opcion == "3":
@@ -116,11 +119,14 @@ def registrar_usuario(
     usuario: str,
     duracion: float,
     sample_rate: int,
-    dataset_path: Path,
     audio_file: str | None = None,
 ) -> None:
     """Graba una muestra y la guarda como perfil del usuario indicado."""
-    dataset = cargar_dataset(dataset_path)
+    try:
+        dataset = cargar_dataset()
+    except DatabaseError as exc:
+        print(f"Error de base de datos: {exc}")
+        return
 
     if usuario in dataset:
         print(f"Aviso: el usuario '{usuario}' ya existia y sera actualizado.")
@@ -137,8 +143,11 @@ def registrar_usuario(
         print("No se pudo estimar el pitch. Intenta de nuevo con menos ruido.")
         return
 
-    dataset[usuario] = perfil
-    guardar_dataset(dataset_path, dataset)
+    try:
+        guardar_usuario(usuario, perfil)
+    except DatabaseError as exc:
+        print(f"Error de base de datos: {exc}")
+        return
 
     print(f"Usuario '{usuario}' registrado correctamente.")
     print(f"Pitch estimado: {perfil['pitch_hz']:.2f} Hz")
@@ -147,14 +156,18 @@ def registrar_usuario(
 def verificar_identidad(
     duracion: float,
     sample_rate: int,
-    dataset_path: Path,
     umbral: float,
+    palabra_clave: str,
     audio_file: str | None = None,
 ) -> None:
     """Identifica al hablante comparando su voz contra todos los usuarios del dataset."""
-    dataset = cargar_dataset(dataset_path)
+    try:
+        dataset = cargar_dataset()
+    except DatabaseError as exc:
+        print(f"Error de base de datos: {exc}")
+        return
     if not dataset:
-        print("El dataset esta vacio. Primero registra usuarios.")
+        print("No hay usuarios registrados. Primero registra usuarios en la base de datos.")
         return
 
     try:
@@ -169,24 +182,37 @@ def verificar_identidad(
         print("No se pudo estimar el pitch en la muestra actual.")
         return
 
+    try:
+        texto_escuchado = transcribir_audio(audio, sample_rate)
+    except RuntimeError as exc:
+        print(f"Error al reconocer la palabra clave: {exc}")
+        return
+
+    palabra_correcta = contiene_palabra_clave(texto_escuchado, palabra_clave)
+
     mejor_usuario, mejor_dist = mejor_coincidencia(perfil_actual, dataset)
     if mejor_usuario is None:
         print("No fue posible encontrar coincidencias en el dataset.")
         return
 
     print(f"Pitch muestra: {perfil_actual['pitch_hz']:.2f} Hz")
+    print(f"Texto reconocido: '{texto_escuchado or 'no reconocido'}'")
     print(f"Mejor coincidencia: {mejor_usuario} (distancia={mejor_dist:.4f}, umbral={umbral:.4f})")
 
-    if mejor_dist <= umbral:
+    if palabra_correcta and mejor_dist <= umbral:
         print(f"Resultado: usuario identificado -> '{mejor_usuario}'.")
     else:
         print("Resultado: usuario no identificado con suficiente confianza.")
+        if not palabra_correcta:
+            print(f"La palabra clave '{palabra_clave}' no fue detectada.")
+        if mejor_dist > umbral:
+            print(f"La voz no coincide lo suficiente (distancia {mejor_dist:.4f} > {umbral:.4f}).")
 
 
 def construir_parser() -> argparse.ArgumentParser:
     """Crea la CLI con comandos de registro y verificacion."""
     parser = argparse.ArgumentParser(
-        description="Autenticacion de voz basica con FFT (pitch y armonicos)"
+        description="Autenticacion de voz basica con FFT, reconocimiento de palabra clave y PostgreSQL"
     )
 
     parser.add_argument(
@@ -194,12 +220,6 @@ def construir_parser() -> argparse.ArgumentParser:
         type=int,
         default=16000,
         help="Frecuencia de muestreo en Hz (recomendado: 16000)",
-    )
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        default=str(DEFAULT_DATASET_PATH),
-        help="Ruta del JSON del dataset",
     )
 
     subparsers = parser.add_subparsers(dest="comando", required=True)
@@ -234,6 +254,12 @@ def construir_parser() -> argparse.ArgumentParser:
         default=None,
         help="Ruta a archivo WAV para verificar (si se omite, usa microfono por defecto)",
     )
+    p_ver.add_argument(
+        "--palabra-clave",
+        type=str,
+        default=PALABRA_CLAVE_POR_DEFECTO,
+        help="Palabra clave esperada durante la verificacion",
+    )
 
     return parser
 
@@ -249,22 +275,19 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    dataset_path = Path(args.dataset)
-
     if args.comando == "registrar":
         registrar_usuario(
             usuario=args.usuario,
             duracion=float(args.duracion),
             sample_rate=int(args.sample_rate),
-            dataset_path=dataset_path,
             audio_file=args.audio_file,
         )
     elif args.comando == "verificar":
         verificar_identidad(
             duracion=float(args.duracion),
             sample_rate=int(args.sample_rate),
-            dataset_path=dataset_path,
             umbral=float(args.umbral),
+            palabra_clave=str(args.palabra_clave),
             audio_file=args.audio_file,
         )
     else:
