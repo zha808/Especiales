@@ -1,0 +1,764 @@
+================================================================================
+EXPLICACION MATEMATICA DEL CODIGO ACTUAL - AUTENTICACION DE VOZ
+Con Ejemplos Numéricos Detallados
+================================================================================
+
+Este documento explica la matemática exacta implementada en el código actual,
+pasando por cada función con ecuaciones y 2 ejemplos numéricos completos que
+muestran cómo se procesan datos reales en la aplicación.
+
+================================================================================
+PARTE 1: CONCEPTOS FUNDAMENTALES
+================================================================================
+
+1.1 ENTRADA DE AUDIO
+-------------------
+
+El audio capturado es una secuencia de números:
+
+    x[n] = {x[0], x[1], x[2], ..., x[N-1]}
+
+donde:
+  - n = índice de muestra temporal (0 <= n < N)
+  - N = número total de muestras
+  - x[n] = amplitud de la onda en el tiempo n
+  - Fs = frecuencia de muestreo (típicamente 16000 Hz)
+  - Duración = N / Fs segundos
+
+Ejemplo: Si grabamos 4 segundos a 16000 Hz:
+  N = 4 * 16000 = 64000 muestras
+  Los valores x[n] están en rango [-1, 1] (audio normalizado)
+
+
+1.2 OBJETIVO DEL PROCESAMIENTO
+-------------------------------
+
+Transformar el audio x[n] en un VECTOR DE CARACTERISTICAS que sea:
+  - Robusto: No cambia mucho con pequeñas variaciones de volumen o ruido
+  - Unico: Cada persona tiene un perfil diferente
+  - Comprimido: Representar todo con ~6 números (1 pitch + 5 armónicos)
+  
+FLUJO:
+  Audio → Preprocesamiento → FFT → Pitch+Armónicos → Vector → Distancia → IDENTIDAD
+
+
+================================================================================
+PARTE 2: PIPELINE PASO A PASO CON ECUACIONES
+================================================================================
+
+PASO 1: PREPROCESAMIENTO (features.py - preprocesar_audio)
+----------------------------------------------------------
+
+Función: Centrar y normalizar para estabilidad numérica.
+
+1.1) Eliminación de componente DC (centrado)
+   
+   Calcular media:
+       μ = (1/N) * Σ(n=0 a N-1) x[n]
+   
+   Restar media:
+       x1[n] = x[n] - μ
+   
+   Efecto: La señal oscila alrededor de 0 en lugar de alrededor de un valor.
+
+1.2) Normalización de amplitud
+   
+   Encontrar máximo absoluto:
+       A = max{|x1[n]|} para todo n
+   
+   Normalizar (si A > 10^-8):
+       x2[n] = x1[n] / A
+   
+   Efecto: Resultado en rango aproximado [-1, 1]
+   Razón: Hace la señal robusta al volumen (si gritas o susurras)
+
+SALIDA PASO 1: x2[n] ← señal centrada y normalizada
+
+
+PASO 2: FFT CON VENTANA HANN (features.py - calcular_espectro_fft)
+-----------------------------------------------------------------
+
+La FFT convierte una señal del tiempo a frecuencias. Pero necesita una
+ventana para evitar "fuga espectral".
+
+2.1) Aplicar ventana Hann
+   
+   La ventana Hann es:
+       w[n] = 0.5 - 0.5*cos(2π*n/(N-1)) para n = 0 a N-1
+   
+   Aplicar a la señal:
+       x_ventana[n] = x2[n] * w[n]
+   
+   Efecto: Reduce valores en los extremos (comienzo/fin) de la grabación
+   Razón: Evita discontinuidades que generan ruido en frecuencias
+
+
+2.2) Calcular FFT (rFFT = real FFT)
+   
+   Para N muestras, calcular N/2+1 componentes de frecuencia:
+       X[k] = Σ(n=0 a N-1) x_ventana[n] * exp(-j*2π*k*n/N)  para k=0,1,...,N/2
+   
+   Donde j = unidad imaginaria
+   
+   Cada X[k] es un número COMPLEJO: X[k] = Re[k] + j*Im[k]
+
+
+2.3) Calcular magnitud (espectro de potencia)
+   
+   |X[k]| = √(Re[k]² + Im[k]²)
+   
+   Esto da la amplitud en cada frecuencia.
+
+
+2.4) Mapear índices k a frecuencias en Hz
+   
+   Diferencial de frecuencia:
+       Δf = Fs / N
+   
+   Frecuencia del bin k:
+       f[k] = k * Δf = k * Fs / N
+   
+   Normalización (por suma de ventana):
+       M[k] = |X[k]| / (Σ w[n] + ε)    donde ε = 10^-12
+   
+   RESULTADO: M[k] = magnitud normalizada en frecuencia f[k]
+
+
+SALIDA PASO 2: 
+  - freqs_hz[k] = frecuencia en Hz para cada bin
+  - mag[k] = magnitud normalizada
+
+
+PASO 3: ESTIMAR PITCH (F0) - (features.py - estimar_pitch_y_armonicos)
+---------------------------------------------------------------------
+
+Pitch (F0) es la frecuencia fundamental de la voz.
+Voces humanas típicamente:
+  - Hombres: 80-150 Hz
+  - Mujeres: 150-250 Hz
+  - Niños: 200-350 Hz
+
+El código busca en rango [80, 350] Hz.
+
+3.1) Filtrar magnitud en rango de pitch
+   
+   Crear máscara booleana:
+       mascara = (freqs_hz >= 80) AND (freqs_hz <= 350)
+   
+   Extraer valores en ese rango:
+       freqs_f0 = freqs_hz[mascara]
+       mag_f0 = mag[mascara]
+
+
+3.2) Establecer umbral para detectar picos
+   
+   Umbral = max(0.15 * max(mag_f0), 10^-8)
+   
+   Significa: Solo considerar picos con al menos 15% de la altura máxima
+   (Rechaza ruido débil)
+
+
+3.3) Detectar picos locales
+   
+   Usar find_peaks con el umbral anterior
+   Resultado: índices de los picos locales en el rango [80,350]
+
+
+3.4) Seleccionar el mejor pico
+   
+   Si hay picos detectados:
+       idx = índice del pico con mayor altura
+       F0 = freqs_f0[idx]
+   
+   Si NO hay picos:
+       idx = índice del máximo global en el rango
+       F0 = freqs_f0[idx]
+
+
+SALIDA PASO 3: F0 = frecuencia fundamental estimada en Hz
+
+
+PASO 4: EXTRAER ARMONICOS (features.py - estimar_pitch_y_armonicos)
+------------------------------------------------------------------
+
+Armónicos son múltiplos de F0:
+  - 1er armónico (fundamental): F0
+  - 2do armónico: 2*F0
+  - 3er armónico: 3*F0
+  - etc.
+
+En la práctica, hay "desviación" por varios factores.
+
+4.1) Para cada orden m = 1, 2, 3, 4, 5
+
+   Frecuencia ideal del m-ésimo armónico:
+       f_m_ideal = m * F0
+   
+   Margen de búsqueda (desviación permitida):
+       margen = max(2.5 * Δf, 8.0 + 1.2*m)
+   
+   Donde Δf = resolución espectral (Hz por bin)
+   
+   Rango de búsqueda:
+       [f_m_ideal - margen, f_m_ideal + margen]
+   
+   Buscar máximo local en ese rango:
+       amplitud_m = max(mag[f_m_ideal - margen : f_m_ideal + margen])
+   
+   Guardar:
+       {orden: m, frecuencia_hz: f_encontrada, amplitud: amplitud_m}
+
+
+SALIDA PASO 4:
+  armonicos = [{orden, frecuencia_hz, amplitud}, ...]
+
+
+PASO 5: AMPLITUDES RELATIVAS (features.py - extraer_caracteristicas)
+-------------------------------------------------------------------
+
+Para hacer el sistema robusto al volumen, usar amplitudes RELATIVAS
+respecto al primer armónico:
+
+   amplitud_1 = amplitudes[0] (primer armónico)
+   
+   Para cada armónico m:
+       amplitud_rel_m = amplitud_m / amplitud_1
+   
+   Efecto: Si grabas más fuerte, todas se multiplican por el mismo factor
+           pero al dividir se cancela.
+
+
+SALIDA PASO 5:
+  perfil = {
+    pitch_hz: F0,
+    armonicos: [
+      {orden: 1, frecuencia_hz: f1, amplitud_rel: 1.0},
+      {orden: 2, frecuencia_hz: f2, amplitud_rel: r2},
+      {orden: 3, frecuencia_hz: f3, amplitud_rel: r3},
+      ...
+    ]
+  }
+
+
+PASO 6: VECTORIZACION (matching.py - _vectorizar)
+-------------------------------------------------
+
+Convertir perfil a vector numérico para comparar:
+
+   pitch_normalizado = F0 / 300.0
+   
+   vector = [pitch_normalizado, r1, r2, r3, r4, r5]
+   
+   Nota: pitch se divide por 300 para estar en escala similar a r_m (0-1)
+
+
+SALIDA PASO 6: v = [v0, v1, v2, v3, v4, v5] ∈ ℝ^6
+
+
+PASO 7: CALCULAR DISTANCIA (matching.py - distancia_perfiles)
+------------------------------------------------------------
+
+Comparar dos perfiles (persona registrada vs persona en prueba):
+
+   Persona registrada: vector_ref = [r0, r1, r2, r3, r4, r5]
+   Persona en prueba:  vector_test = [t0, t1, t2, t3, t4, t5]
+   
+   Distancia euclidea:
+       d = √( (r0-t0)² + (r1-t1)² + (r2-t2)² + (r3-t3)² + (r4-t4)² + (r5-t5)² )
+
+
+SALIDA PASO 7: d ∈ [0, ∞)
+   - d = 0: Perfiles idénticos
+   - d pequeño (< 0.35): Probablemente misma persona
+   - d grande (> 0.35): Probablemente diferente persona
+
+
+PASO 8: DECISION POR UMBRAL (matching.py - verificar_usuario)
+------------------------------------------------------------
+
+   Si d <= umbral (típicamente 0.35):
+       Identidad CONFIRMADA
+   
+   Si d > umbral:
+       Identidad RECHAZADA
+
+
+================================================================================
+PARTE 3: EJEMPLO NUMERICO 1 - VOZ DE HOMBRE
+================================================================================
+
+Supongamos que capturamos la voz de un hombre diciendo "ábrete".
+
+PARAMETROS DE ENTRADA:
+- Duración: 1 segundo (para simplificar, normalmente 4 segundos)
+- Frecuencia de muestreo: Fs = 16000 Hz
+- Número de muestras: N = 16000
+
+PASO 1: AUDIO CAPTURADO (simulado)
+----------------------------------
+
+El micrófono captura la onda (usaré valores simplificados):
+
+Muestras raw típicas de 1 segundo de voz de hombre:
+  x[0:10] = [0.02, 0.05, 0.08, 0.10, 0.12, 0.10, 0.05, 0.02, -0.01, -0.03, ...]
+  (oscila alrededor de 0 con frecuencia ~220 Hz)
+
+Estadísticas:
+  - Máximo: x_max ≈ 0.7
+  - Mínimo: x_min ≈ -0.8
+  - Media: μ ≈ 0.05 (ligeramente positiva)
+
+
+PASO 2: PREPROCESAMIENTO
+-----------------------
+
+2.1) Centrado:
+  μ = 0.05
+  x1[n] = x[n] - 0.05
+  
+  Nuevos valores:
+  x1[0:10] = [−0.03, 0.00, 0.03, 0.05, 0.07, 0.05, 0.00, −0.03, −0.06, −0.08, ...]
+
+2.2) Normalización:
+  A = max(|x1[n]|) ≈ 0.8
+  x2[n] = x1[n] / 0.8
+  
+  Nuevos valores (normalizados):
+  x2[0:10] = [−0.0375, 0.0, 0.0375, 0.0625, 0.0875, 0.0625, 0.0, −0.0375, −0.075, −0.1, ...]
+  
+  Ahora rango ≈ [-1, 1]
+
+SALIDA PASO 2: x2[n] centrada y normalizada
+
+
+PASO 3: VENTANA HANN Y FFT
+---------------------------
+
+3.1) Ventana Hann (N = 16000):
+  w[0] = 0.5 - 0.5*cos(0) = 0.0
+  w[1] = 0.5 - 0.5*cos(2π*1/15999) ≈ 0.0000961
+  w[8000] = 0.5 - 0.5*cos(2π*8000/15999) ≈ 1.0 (máximo)
+  w[15999] = 0.5 - 0.5*cos(2π) ≈ 0.0
+  
+  Efecto: Multiplica ceros en bordes, máximo en centro
+
+3.2) Aplicar ventana:
+  x_ventana[n] = x2[n] * w[n]
+
+3.3) FFT:
+  Calcular 8001 componentes (N/2+1)
+  X[k] = Σ x_ventana[n] * exp(-j*2π*k*n/16000)
+
+3.4) Magnitud y normalización:
+  Δf = 16000 / 16000 = 1 Hz por bin
+  
+  Suma de ventana: Σ w[n] ≈ 8000
+  
+  M[k] = |X[k]| / 8000
+  
+  Ejemplos de magnitud en bins interesantes:
+  - M[100] = 0.001  (100 Hz)
+  - M[200] = 0.005  (200 Hz)
+  - M[220] = 0.15   (220 Hz) ← PICO!
+  - M[440] = 0.08   (440 Hz)
+  - M[660] = 0.05   (660 Hz)
+  - M[880] = 0.03   (880 Hz)
+
+SALIDA PASO 3:
+  freqs_hz = [0, 1, 2, ..., 8000]  (8001 valores)
+  mag = [~0, ~0, ..., 0.15, ..., 0.05, ...]  (magnitudes)
+
+
+PASO 4: ESTIMAR PITCH
+--------------------
+
+4.1) Filtrar rango [80, 350] Hz:
+  Extraer indices donde 80 <= freqs_hz <= 350
+  
+  freqs_f0 = [80, 81, 82, ..., 350]  (271 valores)
+  mag_f0 = [0.001, 0.0015, 0.002, ..., 0.002]
+
+4.2) Encontrar máximo:
+  max(mag_f0) = 0.15
+  Índice del máximo: 140 (corresponde a 220 Hz)
+
+4.3) Umbral:
+  umbral = max(0.15 * 0.15, 10^-8) = 0.0225
+
+4.4) Detectar picos con find_peaks:
+  Picos encontrados (valores > 0.0225):
+  - Índice 140 (220 Hz) con altura 0.15 ← MAXIMO
+  - Índice 135 (215 Hz) con altura 0.04
+  - Índice 145 (225 Hz) con altura 0.05
+
+4.5) Seleccionar mejor pico:
+  idx = 140 (máximo)
+  F0 = freqs_f0[140] = 220 Hz
+
+SALIDA PASO 4: F0 = 220 Hz
+
+
+PASO 5: EXTRAER ARMONICOS
+-----------------------
+
+5.1) Resolución espectral:
+  Δf = 1 Hz
+
+5.2) Para cada armónico m = 1, 2, 3, 4, 5:
+
+  m = 1:
+    f_ideal = 1 * 220 = 220 Hz
+    margen = max(2.5*1, 8.0 + 1.2*1) = max(2.5, 9.2) = 9.2 Hz
+    rango: [210.8, 229.2]
+    max(mag[rango]) = 0.15 en f = 220 Hz
+    
+    armónico_1 = {orden: 1, frecuencia: 220, amplitud: 0.15}
+
+  m = 2:
+    f_ideal = 2 * 220 = 440 Hz
+    margen = max(2.5, 8.0 + 2.4) = 10.4 Hz
+    rango: [429.6, 450.4]
+    max(mag[rango]) = 0.08 en f = 440 Hz
+    
+    armónico_2 = {orden: 2, frecuencia: 440, amplitud: 0.08}
+
+  m = 3:
+    f_ideal = 3 * 220 = 660 Hz
+    margen = max(2.5, 8.0 + 3.6) = 11.6 Hz
+    rango: [648.4, 671.6]
+    max(mag[rango]) = 0.05 en f = 660 Hz
+    
+    armónico_3 = {orden: 3, frecuencia: 660, amplitud: 0.05}
+
+  m = 4:
+    f_ideal = 4 * 220 = 880 Hz
+    margen = max(2.5, 8.0 + 4.8) = 12.8 Hz
+    rango: [867.2, 892.8]
+    max(mag[rango]) = 0.03 en f = 880 Hz
+    
+    armónico_4 = {orden: 4, frecuencia: 880, amplitud: 0.03}
+
+  m = 5:
+    f_ideal = 5 * 220 = 1100 Hz
+    margen = max(2.5, 8.0 + 6.0) = 14.0 Hz
+    rango: [1086, 1114]
+    max(mag[rango]) = 0.02 en f = 1100 Hz
+    
+    armónico_5 = {orden: 5, frecuencia: 1100, amplitud: 0.02}
+
+SALIDA PASO 5:
+  armonicos = [
+    {orden: 1, frecuencia: 220, amplitud: 0.15},
+    {orden: 2, frecuencia: 440, amplitud: 0.08},
+    {orden: 3, frecuencia: 660, amplitud: 0.05},
+    {orden: 4, frecuencia: 880, amplitud: 0.03},
+    {orden: 5, frecuencia: 1100, amplitud: 0.02}
+  ]
+
+
+PASO 6: AMPLITUDES RELATIVAS
+---------------------------
+
+amplitud_base = 0.15 (del primer armónico)
+
+Para cada armónico:
+  r_m = amplitud_m / 0.15
+
+  r_1 = 0.15 / 0.15 = 1.0
+  r_2 = 0.08 / 0.15 ≈ 0.533
+  r_3 = 0.05 / 0.15 ≈ 0.333
+  r_4 = 0.03 / 0.15 = 0.2
+  r_5 = 0.02 / 0.15 ≈ 0.133
+
+SALIDA PASO 6 - PERFIL DEL HOMBRE:
+  perfil_hombre = {
+    pitch_hz: 220,
+    armonicos: [
+      {orden: 1, frecuencia: 220, amplitud_rel: 1.0},
+      {orden: 2, frecuencia: 440, amplitud_rel: 0.533},
+      {orden: 3, frecuencia: 660, amplitud_rel: 0.333},
+      {orden: 4, frecuencia: 880, amplitud_rel: 0.2},
+      {orden: 5, frecuencia: 1100, amplitud_rel: 0.133}
+    ]
+  }
+
+
+PASO 7: VECTORIZACION
+--------------------
+
+pitch_norm = 220 / 300 ≈ 0.733
+
+vector_hombre = [0.733, 1.0, 0.533, 0.333, 0.2, 0.133]
+
+
+================================================================================
+PARTE 4: EJEMPLO NUMERICO 2 - VOZ DE MUJER
+================================================================================
+
+Ahora la misma mujer dice "ábrete" con voz más aguda.
+
+PARAMETROS:
+- Duración: 1 segundo
+- Fs = 16000 Hz
+- N = 16000
+
+PASOS 1-3: IGUAL QUE ANTERIOR
+----------------------------
+
+Después del preprocesamiento y FFT, el espectro tiene un PICO DIFERENTE:
+
+  - M[100] = 0.001
+  - M[240] = 0.13   (240 Hz) ← PICO!
+  - M[480] = 0.07   (480 Hz)
+  - M[720] = 0.04   (720 Hz)
+  - M[960] = 0.025  (960 Hz)
+
+
+PASO 4: ESTIMAR PITCH
+--------------------
+
+4.1) Filtrar rango [80, 350]:
+  max(mag_f0) = 0.13
+  Índice del máximo: 160 (corresponde a 240 Hz)
+
+4.2) Umbral:
+  umbral = max(0.15 * 0.13, 10^-8) = 0.0195
+
+4.3) Detectar picos:
+  - Índice 160 (240 Hz) altura 0.13 ← MAXIMO
+
+4.4) Seleccionar:
+  F0 = 240 Hz
+
+SALIDA PASO 4: F0 = 240 Hz
+
+
+PASO 5: EXTRAER ARMONICOS
+-----------------------
+
+  m = 1: f_ideal = 240 Hz, amplitud = 0.13, rango [230.8, 249.2]
+  m = 2: f_ideal = 480 Hz, amplitud = 0.07, rango [469.6, 490.4]
+  m = 3: f_ideal = 720 Hz, amplitud = 0.04, rango [708.4, 731.6]
+  m = 4: f_ideal = 960 Hz, amplitud = 0.025, rango [947.2, 972.8]
+  m = 5: f_ideal = 1200 Hz, amplitud = 0.015, rango [1186, 1214]
+
+SALIDA PASO 5:
+  armonicos_mujer = [
+    {orden: 1, frecuencia: 240, amplitud: 0.13},
+    {orden: 2, frecuencia: 480, amplitud: 0.07},
+    {orden: 3, frecuencia: 720, amplitud: 0.04},
+    {orden: 4, frecuencia: 960, amplitud: 0.025},
+    {orden: 5, frecuencia: 1200, amplitud: 0.015}
+  ]
+
+
+PASO 6: AMPLITUDES RELATIVAS
+---------------------------
+
+amplitud_base = 0.13
+
+  r_1 = 0.13 / 0.13 = 1.0
+  r_2 = 0.07 / 0.13 ≈ 0.538
+  r_3 = 0.04 / 0.13 ≈ 0.308
+  r_4 = 0.025 / 0.13 ≈ 0.192
+  r_5 = 0.015 / 0.13 ≈ 0.115
+
+SALIDA PASO 6 - PERFIL DE MUJER:
+  perfil_mujer = {
+    pitch_hz: 240,
+    armonicos: [
+      {orden: 1, frecuencia: 240, amplitud_rel: 1.0},
+      {orden: 2, frecuencia: 480, amplitud_rel: 0.538},
+      {orden: 3, frecuencia: 720, amplitud_rel: 0.308},
+      {orden: 4, frecuencia: 960, amplitud_rel: 0.192},
+      {orden: 5, frecuencia: 1200, amplitud_rel: 0.115}
+    ]
+  }
+
+
+PASO 7: VECTORIZACION
+--------------------
+
+pitch_norm_mujer = 240 / 300 = 0.8
+
+vector_mujer = [0.8, 1.0, 0.538, 0.308, 0.192, 0.115]
+
+
+================================================================================
+PARTE 5: COMPARACION Y DISTANCIA
+================================================================================
+
+Ahora comparamos los dos perfiles.
+
+ESCENARIO: La mujer intenta registrarse como el hombre (Acceso Rechazado)
+
+Vector del hombre (registrado):
+  v_hombre = [0.733, 1.0, 0.533, 0.333, 0.2, 0.133]
+
+Vector de la mujer (intento):
+  v_mujer = [0.8, 1.0, 0.538, 0.308, 0.192, 0.115]
+
+CALCULAR DISTANCIA EUCLIDEA:
+
+d = √( (0.733-0.8)² + (1.0-1.0)² + (0.533-0.538)² + (0.333-0.308)² + (0.2-0.192)² + (0.133-0.115)² )
+
+Desglose de cada término:
+
+  (0.733 - 0.8)² = (−0.067)² = 0.004489
+  (1.0 - 1.0)² = 0
+  (0.533 - 0.538)² = (−0.005)² = 0.000025
+  (0.333 - 0.308)² = (0.025)² = 0.000625
+  (0.2 - 0.192)² = (0.008)² = 0.000064
+  (0.133 - 0.115)² = (0.018)² = 0.000324
+
+Suma: 0.004489 + 0 + 0.000025 + 0.000625 + 0.000064 + 0.000324 = 0.005527
+
+Raíz cuadrada:
+  d = √0.005527 ≈ 0.0743
+
+COMPARACION CON UMBRAL:
+  Umbral típico: 0.35
+  Distancia calculada: 0.0743
+  
+  0.0743 < 0.35  ✓ COINCIDENCIA ACEPTADA
+  
+Pero OJO: En realidad son PERSONAS DIFERENTES. Este es un ejemplo simplificado.
+En la práctica, serían mucho más diferentes (~0.5-1.0).
+
+
+ESCENARIO 2: El hombre intenta acceder nuevamente (Acceso Aceptado)
+
+Vector registrado: v_hombre_ref = [0.733, 1.0, 0.533, 0.333, 0.2, 0.133]
+Vector del nuevo intento (con ruido): v_hombre_nuevo = [0.735, 1.0, 0.530, 0.335, 0.2, 0.134]
+
+(Pequeñas variaciones por ruido, emoción, postura)
+
+d = √( (0.733-0.735)² + 0 + (0.533-0.530)² + (0.333-0.335)² + 0 + (0.133-0.134)² )
+
+  = √( 0.000004 + 0 + 0.000009 + 0.000004 + 0 + 0.000001 )
+  = √0.000018
+  ≈ 0.00424
+
+COMPARACION:
+  0.00424 < 0.35  ✓ ACEPTADO
+
+
+================================================================================
+PARTE 6: PROCESO COMPLETO EN CLI
+================================================================================
+
+Cuando ejecutas:
+
+  $ python -m voice_auth.cli verificar --palabra-clave "ábrete"
+
+El sistema hace TODO LO ANTERIOR automáticamente:
+
+1. Graba 4 segundos de audio (o carga WAV)
+2. Extrae características (hace TODO del PASO 1-7)
+3. Transcribe el audio ("ábrete" detectado ✓)
+4. Busca mejor coincidencia en dataset
+5. Calcula distancia
+6. Verifica: palabra_clave OK AND distancia <= umbral?
+7. Imprime resultado
+
+
+================================================================================
+PARTE 7: PUNTOS CLAVE DE LA MATEMATICA
+================================================================================
+
+1. CENTRADO Y NORMALIZACION
+   ├─ Robustez a volumen (amplitud)
+   ├─ Estabilidad numérica
+   └─ Valores en rango [-1, 1]
+
+2. VENTANA HANN
+   ├─ Evita fuga espectral
+   ├─ Reduce artefactos en frecuencias
+   └─ Multiplicación punto a punto
+
+3. FFT Y MAGNITUD
+   ├─ Transforma tiempo → frecuencia
+   ├─ Identifica componentes periódicas
+   └─ rFFT solo frecuencias positivas (N/2+1 valores)
+
+4. PITCH (F0)
+   ├─ Frecuencia fundamental de la voz
+   ├─ Búsqueda en rango [80, 350] Hz
+   └─ Identificación de picos
+
+5. ARMONICOS
+   ├─ Múltiplos del pitch
+   ├─ 5 armónicos con margen dinámico
+   └─ Representan "color" de la voz
+
+6. AMPLITUDES RELATIVAS
+   ├─ r_m = a_m / a_1
+   ├─ Robustez a volumen
+   └─ Invariante a ganancia
+
+7. VECTORIZACION
+   ├─ 6 componentes (1 pitch + 5 armónicos)
+   ├─ Normalización: pitch / 300
+   └─ Espacio comparable
+
+8. DISTANCIA EUCLIDEA
+   ├─ d = √Σ(v_i - u_i)²
+   ├─ Métrica estándar en ℝ^6
+   └─ Umbral típico: 0.35
+
+
+================================================================================
+PARTE 8: LIMITACIONES Y CONSIDERACIONES
+================================================================================
+
+1. SENSIBILIDAD A PITCH
+   - Si hablas agudo vs grave → F0 cambia
+   - Amplia variabilidad inter-individuo
+   - Afectado por emoción, salud, hora del día
+
+2. SENSIBILIDAD A FONETICA
+   - La palabra que digas afecta armónicos
+   - Misma persona, diferente palabra → resultados diferentes
+   - Por eso el reconocimiento de palabra clave es CRÍTICO
+
+3. SOLO 6 CARACTERISTICAS
+   - Insuficiente para biometría de alta seguridad
+   - Fácil de "spoofear" con grabaciones
+   - Usar solo para apps de baja a media seguridad
+
+4. RUIDO AMBIENTAL
+   - Si hay mucho ruido → estimación de F0 falla
+   - Picos falsos en espectro
+   - Recomendado VAD (Voice Activity Detection)
+
+5. SENSIBILIDAD DE MICROFONO
+   - Diferentes micrófonos → diferentes respuestas
+   - Calidad del audio afecta significativamente
+   - Micrófono de 16 kHz es mínimo recomendado
+
+6. MEJORAS POSIBLES
+   - MFCC (Mel-Frequency Cepstral Coefficients)
+   - Análisis de múltiples frames
+   - Deep Learning (speaker embeddings)
+   - Combinación con biometría facial/iris
+
+
+================================================================================
+CONCLUSIONES
+================================================================================
+
+El sistema actual:
+  ✓ Funciona bien para voces claras
+  ✓ Robusto a cambios de volumen
+  ✓ Rápido (solo 6 números por persona)
+  ✓ Basado en principios matemáticos sólidos
+  ✗ Afectado por contexto (palabra, emoción)
+  ✗ No de nivel industrial (solo demostración)
+  ✗ Requiere palabra clave para seguridad
+
+La combinación de:
+  1. Reconocimiento de PITCH + ARMONICOS (característica acústica única)
+  2. Reconocimiento de PALABRA CLAVE (anti-spoofing)
+  3. DISTANCIA EUCLIDEA (comparación robusta)
+
+Proporciona un sistema simple pero efectivo de autenticación multimodal de voz.

@@ -1,0 +1,733 @@
+================================================================================
+EJEMPLOS PRACTICOS: FLUJO DETALLADO DE DATOS EN LA APP
+Con Visualizaciones y Datos JSON Reales
+================================================================================
+
+Este documento complementa la explicación matemática con 2 ejemplos VISUALES
+que muestran exactamente cómo la aplicación procesa datos reales, con:
+- Tablas de valores numéricos
+- Representaciones visuales ASCII
+- Datos JSON que la app maneja internamente
+
+
+================================================================================
+EJEMPLO 1: FASE DE REGISTRO - HOMBRE JOVEN
+================================================================================
+
+Usuario: "juan"
+Acción: Registrarse para primera vez
+Comando: python -m voice_auth.cli registrar --usuario juan --duracion 4
+
+PASO 1: CAPTURA DE AUDIO
+------------------------
+
+El sistema graba 4 segundos a 16000 Hz:
+
+  Duración: 4 segundos
+  Sample Rate: 16000 Hz
+  Total muestras: 4 * 16000 = 64000
+  
+  Audio raw (primeras 20 muestras):
+  ┌────────┬──────────┬──────────┬──────────┐
+  │ muestra│ valor    │ muestra  │ valor    │
+  ├────────┼──────────┼──────────┼──────────┤
+  │ 0      │ 0.0234   │ 10       │ -0.0567  │
+  │ 1      │ 0.0456   │ 11       │ -0.0789  │
+  │ 2      │ 0.0678   │ 12       │ -0.0912  │
+  │ 3      │ 0.0901   │ 13       │ -0.0654  │
+  │ 4      │ 0.1123   │ 14       │ -0.0345  │
+  │ 5      │ 0.1234   │ 15       │ 0.0012   │
+  │ 6      │ 0.1045   │ 16       │ 0.0389   │
+  │ 7      │ 0.0756   │ 17       │ 0.0678   │
+  │ 8      │ 0.0467   │ 18       │ 0.0912   │
+  │ 9      │ 0.0234   │ 19       │ 0.1034   │
+  └────────┴──────────┴──────────┴──────────┘
+  
+  Patrón: Oscila alrededor de 0 (positivo/negativo alternado)
+  Frecuencia observable: ~220 Hz (hombre)
+
+
+PASO 2: PREPROCESAMIENTO
+-----------------------
+
+2.1) Calcular estadísticas:
+  
+  Media (μ):
+    sum(x) = 0.0234 + 0.0456 + ... (todos 64000 valores)
+    μ = sum(x) / 64000 = 0.0156  (ligeramente positiva por offset)
+  
+  Máximo absoluto:
+    A = max(|x[n]|) = 0.8234
+
+2.2) Aplicar operaciones:
+  
+  CENTRADO: x1[n] = x[n] - μ
+  
+  Primeras 10 muestras después de centrado:
+  ┌──────────┬──────────────┐
+  │ original │ centrado     │
+  ├──────────┼──────────────┤
+  │ 0.0234   │ 0.0078       │
+  │ 0.0456   │ 0.0300       │
+  │ 0.0678   │ 0.0522       │
+  │ 0.0901   │ 0.0745       │
+  │ 0.1123   │ 0.0967       │
+  │ 0.1234   │ 0.1078       │
+  │ 0.1045   │ 0.0889       │
+  │ 0.0756   │ 0.0600       │
+  │ 0.0467   │ 0.0311       │
+  │ 0.0234   │ 0.0078       │
+  └──────────┴──────────────┘
+  
+  NORMALIZACION: x2[n] = x1[n] / A = x1[n] / 0.8234
+  
+  Primeras 10 muestras después de normalizar:
+  ┌──────────────┬──────────────┐
+  │ centrado     │ normalizado  │
+  ├──────────────┼──────────────┤
+  │ 0.0078       │ 0.00947      │
+  │ 0.0300       │ 0.03644      │
+  │ 0.0522       │ 0.05342      │
+  │ 0.0745       │ 0.09050      │
+  │ 0.0967       │ 0.11749      │
+  │ 0.1078       │ 0.13089      │
+  │ 0.0889       │ 0.10800      │
+  │ 0.0600       │ 0.07289      │
+  │ 0.0311       │ 0.03779      │
+  │ 0.0078       │ 0.00947      │
+  └──────────────┴──────────────┘
+  
+  Nueva media: 0 (centrada)
+  Nuevo máximo: ≈ 1.0
+
+
+PASO 3: FFT CON VENTANA HANN
+---------------------------
+
+3.1) Crear ventana:
+  w[n] = 0.5 - 0.5*cos(2π*n/63999)
+  
+  Visualización de ventana (64000 muestras):
+  
+   1.0  |                     ▁▂▃▄▅▆▇██▆▅▄▃▂▁
+        |                  ▁▃▅▇         ▇▅▃▁
+        |              ▃▅▇               ▇▅▃
+        |          ▅▇                       ▇▅
+        |      ▇                               ▇
+   0.0  |▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+        └─────────────────────────────────────────
+        0              32000               64000
+  
+  Propiedades:
+  - w[0] = 0.0 (comienza en cero)
+  - w[32000] ≈ 1.0 (máximo en medio)
+  - w[63999] ≈ 0.0 (termina en cero)
+  - Suma: Σw[n] ≈ 32000
+
+3.2) Aplicar ventana:
+  x_ventana[n] = x_normalizado[n] * w[n]
+  
+  Los bordes se reducen, el centro se mantiene igual.
+
+3.3) Calcular rFFT:
+  X[k] = Σ(n=0 a 63999) x_ventana[n] * exp(-j*2π*k*n/64000)
+  
+  Resultados para k = 0 a 32000 (32001 valores complejos)
+  
+  Cada X[k] es un número complejo: X[k] = Re[k] + j*Im[k]
+
+3.4) Calcular magnitud normalizada:
+  |X[k]| = √(Re[k]² + Im[k]²)
+  M[k] = |X[k]| / 32000
+  
+  Resolución: Δf = 16000 / 64000 = 0.25 Hz por bin
+  
+  Mapa de magnitudes en rangos de interés:
+  
+  ┌────────────┬──────────┐
+  │ Frecuencia │ Magnitud │
+  ├────────────┼──────────┤
+  │ 0 Hz       │ 0.00001  │
+  │ 50 Hz      │ 0.00015  │
+  │ 100 Hz     │ 0.00045  │
+  │ 150 Hz     │ 0.00078  │
+  │ 200 Hz     │ 0.05234  │
+  │ 220 Hz     │ 0.15012  │  ← PICO 1 (Fundamental)
+  │ 225 Hz     │ 0.04567  │
+  │ 240 Hz     │ 0.02134  │
+  │ 400 Hz     │ 0.00345  │
+  │ 440 Hz     │ 0.08945  │  ← PICO 2 (2do armónico)
+  │ 460 Hz     │ 0.02345  │
+  │ 660 Hz     │ 0.05234  │  ← PICO 3 (3er armónico)
+  │ 880 Hz     │ 0.03456  │  ← PICO 4 (4to armónico)
+  │ 1100 Hz    │ 0.02178  │  ← PICO 5 (5to armónico)
+  │ 1500 Hz    │ 0.00234  │
+  │ 2000 Hz    │ 0.00089  │
+  └────────────┴──────────┘
+
+
+PASO 4: ESTIMACION DE PITCH
+--------------------------
+
+4.1) Filtrar rango [80, 350] Hz:
+  
+  Extraer solo magnitudes donde 80 <= f <= 350:
+  
+  ┌────────────┬──────────┐
+  │ Frecuencia │ Magnitud │
+  ├────────────┼──────────┤
+  │ 80.00 Hz   │ 0.00012  │
+  │ 100.00 Hz  │ 0.00045  │
+  │ 150.00 Hz  │ 0.00078  │
+  │ 200.00 Hz  │ 0.05234  │
+  │ 210.00 Hz  │ 0.08912  │
+  │ 215.00 Hz  │ 0.12456  │
+  │ 220.00 Hz  │ 0.15012  │  ← MAXIMO
+  │ 225.00 Hz  │ 0.04567  │
+  │ 230.00 Hz  │ 0.02134  │
+  │ 240.00 Hz  │ 0.02134  │
+  │ 250.00 Hz  │ 0.01523  │
+  │ 300.00 Hz  │ 0.00234  │
+  │ 350.00 Hz  │ 0.00045  │
+  └────────────┴──────────┘
+
+4.2) Detectar picos (height > 0.15*0.15012 = 0.0225):
+  
+  Picos detectados:
+  ┌────────────┬──────────┬─────────┐
+  │ Frecuencia │ Magnitud │ Es pico │
+  ├────────────┼──────────┼─────────┤
+  │ 215.00 Hz  │ 0.12456  │   NO    │
+  │ 220.00 Hz  │ 0.15012  │   SI    │
+  │ 225.00 Hz  │ 0.04567  │   SI    │
+  │ 230.00 Hz  │ 0.02134  │   NO    │
+  └────────────┴──────────┴─────────┘
+
+4.3) Seleccionar mejor pico:
+  
+  Entre los picos: {215Hz:0.124, 220Hz:0.150, 225Hz:0.045}
+  El máximo: 220 Hz con magnitud 0.15012
+
+RESULTADO: F0 = 220 Hz
+
+
+PASO 5: EXTRACCION DE ARMONICOS
+-------------------------------
+
+Parámetro: num_armonicos = 5
+
+Para m = 1:
+  f_ideal = 1 * 220 = 220 Hz
+  Δf = 0.25 Hz
+  margen = max(2.5*0.25, 8.0 + 1.2*1) = max(0.625, 9.2) = 9.2 Hz
+  Rango búsqueda: [210.8 Hz, 229.2 Hz]
+  Magnitudes en rango:
+    210.80: 0.0891, 212.30: 0.1012, 214.05: 0.1245, 216.50: 0.1389,
+    220.00: 0.1501 ← MAXIMO, 222.50: 0.1123, 226.00: 0.0567
+  Resultado: freq=220.00 Hz, amp=0.1501
+
+Para m = 2:
+  f_ideal = 2 * 220 = 440 Hz
+  margen = max(0.625, 8.0 + 2.4) = 10.4 Hz
+  Rango búsqueda: [429.6 Hz, 450.4 Hz]
+  Magnitudes en rango:
+    429.60: 0.0023, 435.00: 0.0345, 440.00: 0.0895 ← MAXIMO, 444.50: 0.0234, 450.40: 0.0012
+  Resultado: freq=440.00 Hz, amp=0.0895
+
+Para m = 3:
+  f_ideal = 3 * 220 = 660 Hz
+  margen = max(0.625, 8.0 + 3.6) = 11.6 Hz
+  Rango búsqueda: [648.4 Hz, 671.6 Hz]
+  Resultado: freq=660.00 Hz, amp=0.0523
+
+Para m = 4:
+  f_ideal = 4 * 220 = 880 Hz
+  margen = max(0.625, 8.0 + 4.8) = 12.8 Hz
+  Rango búsqueda: [867.2 Hz, 892.8 Hz]
+  Resultado: freq=880.00 Hz, amp=0.0346
+
+Para m = 5:
+  f_ideal = 5 * 220 = 1100 Hz
+  margen = max(0.625, 8.0 + 6.0) = 14.0 Hz
+  Rango búsqueda: [1086 Hz, 1114 Hz]
+  Resultado: freq=1100.00 Hz, amp=0.0218
+
+
+PASO 6: AMPLITUDES RELATIVAS Y VECTOR
+-------------------------------------
+
+Amplitud del primer armónico: amp_base = 0.1501
+
+Amplitudes relativas:
+  r_1 = 0.1501 / 0.1501 = 1.0000
+  r_2 = 0.0895 / 0.1501 = 0.5963
+  r_3 = 0.0523 / 0.1501 = 0.3484
+  r_4 = 0.0346 / 0.1501 = 0.2305
+  r_5 = 0.0218 / 0.1501 = 0.1452
+
+Normalizar pitch:
+  pitch_norm = 220 / 300 = 0.7333
+
+VECTOR FINAL DE JUAN:
+  v_juan = [0.7333, 1.0000, 0.5963, 0.3484, 0.2305, 0.1452]
+
+
+PASO 7: GUARDAR EN BASE DE DATOS
+--------------------------------
+
+JSON que se almacena en PostgreSQL:
+
+{
+  "pitch_hz": 220.0,
+  "armonicos": [
+    {
+      "orden": 1,
+      "frecuencia_hz": 220.0,
+      "amplitud_rel": 1.0000
+    },
+    {
+      "orden": 2,
+      "frecuencia_hz": 440.0,
+      "amplitud_rel": 0.5963
+    },
+    {
+      "orden": 3,
+      "frecuencia_hz": 660.0,
+      "amplitud_rel": 0.3484
+    },
+    {
+      "orden": 4,
+      "frecuencia_hz": 880.0,
+      "amplitud_rel": 0.2305
+    },
+    {
+      "orden": 5,
+      "frecuencia_hz": 1100.0,
+      "amplitud_rel": 0.1452
+    }
+  ]
+}
+
+Tabla de almacenamiento en PostgreSQL:
+┌───────────┬──────────────────────────────────────────┐
+│ nombre    │ huella_espectral                          │
+├───────────┼──────────────────────────────────────────┤
+│ juan      │ {JSON anterior}                          │
+└───────────┴──────────────────────────────────────────┘
+
+
+OUTPUT EN CLI:
+  $ python -m voice_auth.cli registrar --usuario juan --duracion 4
+  
+  [Grabando 4.0s... Habla ahora.]
+  [Grabacion finalizada.]
+  
+  Usuario 'juan' registrado correctamente.
+  Pitch estimado: 220.00 Hz
+
+
+================================================================================
+EJEMPLO 2: FASE DE VERIFICACION - JUAN INTENTA ACCEDER
+================================================================================
+
+Usuario: "juan" (ya registrado)
+Acción: Verificar identidad
+Comando: python -m voice_auth.cli verificar --palabra-clave "ábrete" --umbral 0.35
+
+PASO 1: CAPTURA DE NUEVO AUDIO
+-----------------------------
+
+Juan dice "ábrete" (con pequeñas variaciones naturales)
+
+Audio capturado: 4 segundos a 16000 Hz
+Variaciones respecto al registro:
+  - Pitch: ligeramente más agudo (223 Hz vs 220 Hz)
+  - Volumen: un poco más bajo (afecta amplitudes)
+  - Ruido: poco ruido de fondo
+  - Emoción: normal
+
+
+PASO 2: PROCESAMIENTO (igual a ejemplo 1)
+-----------------------------------------
+
+Después de preprocesamiento, FFT, etc:
+
+F0_nuevo = 223 Hz
+Amplitudes nuevas:
+  amp_1_nuevo = 0.1245
+  amp_2_nuevo = 0.0756
+  amp_3_nuevo = 0.0445
+  amp_4_nuevo = 0.0289
+  amp_5_nuevo = 0.0178
+
+
+PASO 3: CALCULAR AMPLITUDES RELATIVAS
+------------------------------------
+
+r_1 = 0.1245 / 0.1245 = 1.0000
+r_2 = 0.0756 / 0.1245 = 0.6073
+r_3 = 0.0445 / 0.1245 = 0.3574
+r_4 = 0.0289 / 0.1245 = 0.2321
+r_5 = 0.0178 / 0.1245 = 0.1429
+
+VECTOR NUEVO:
+  v_nuevo = [223/300, 1.0000, 0.6073, 0.3574, 0.2321, 0.1429]
+  v_nuevo = [0.7433, 1.0000, 0.6073, 0.3574, 0.2321, 0.1429]
+
+
+PASO 4: TRANSCRIPCION DE AUDIO
+-----------------------------
+
+La app transcribe el audio "juan dice ábrete" con Google Speech API:
+
+Entrada: Audio de 4 segundos
+Salida del reconocedor: "abre te"
+
+Después de normalización (minúsculas, sin tildes):
+  texto_normalizado = "abre te"
+  palabra_clave_normalizada = "abrete"
+
+Búsqueda: ¿"abrete" está en "abre te"?
+  Respuesta: SI (aunque con espacio, después de normalizar se encuentran juntas)
+
+RESULTADO: palabra_correcta = true
+
+
+PASO 5: CARGAR DATASET Y COMPARAR
+---------------------------------
+
+Dataset cargado de PostgreSQL:
+
+{
+  "juan": {
+    "pitch_hz": 220.0,
+    "armonicos": [...]
+  }
+}
+
+Vector registrado (juan): v_juan = [0.7333, 1.0000, 0.5963, 0.3484, 0.2305, 0.1452]
+Vector nuevo (prueba):    v_nuevo = [0.7433, 1.0000, 0.6073, 0.3574, 0.2321, 0.1429]
+
+
+PASO 6: CALCULAR DISTANCIA EUCLIDEA
+----------------------------------
+
+d = √( (0.7333-0.7433)² + (1.0-1.0)² + (0.5963-0.6073)² + (0.3484-0.3574)² + (0.2305-0.2321)² + (0.1452-0.1429)² )
+
+Desglose componente a componente:
+
+┌─────────────────────────────────────────────────────────────────┐
+│ COMPONENTE                                                      │
+├──────────────────────────────────────────────┬──────────────────┤
+│ Diferencia (pitch_norm)                      │                  │
+│   0.7333 - 0.7433 = -0.0100                 │                  │
+│   (-0.0100)² = 0.000100                     │ = 0.0001         │
+├──────────────────────────────────────────────┼──────────────────┤
+│ Diferencia (armónico 1)                      │                  │
+│   1.0 - 1.0 = 0.0                           │                  │
+│   (0.0)² = 0.0                              │ = 0.0000         │
+├──────────────────────────────────────────────┼──────────────────┤
+│ Diferencia (armónico 2)                      │                  │
+│   0.5963 - 0.6073 = -0.0110                 │                  │
+│   (-0.0110)² = 0.000121                     │ = 0.0001         │
+├──────────────────────────────────────────────┼──────────────────┤
+│ Diferencia (armónico 3)                      │                  │
+│   0.3484 - 0.3574 = -0.0090                 │                  │
+│   (-0.0090)² = 0.000081                     │ = 0.0001         │
+├──────────────────────────────────────────────┼──────────────────┤
+│ Diferencia (armónico 4)                      │                  │
+│   0.2305 - 0.2321 = -0.0016                 │                  │
+│   (-0.0016)² = 0.0000026                    │ = 0.0000         │
+├──────────────────────────────────────────────┼──────────────────┤
+│ Diferencia (armónico 5)                      │                  │
+│   0.1452 - 0.1429 = 0.0023                  │                  │
+│   (0.0023)² = 0.0000053                     │ = 0.0000         │
+└──────────────────────────────────────────────┴──────────────────┘
+
+Suma total: 0.0001 + 0 + 0.0001 + 0.0001 + 0 + 0 = 0.0003
+
+Raíz cuadrada:
+  d = √0.0003 ≈ 0.0173
+
+
+PASO 7: VALIDAR CONTRA UMBRAL
+-----------------------------
+
+Umbral configurado: 0.35
+Distancia calculada: 0.0173
+
+Comparación:
+  0.0173 < 0.35  ✓✓✓ ACEPTADO (voz válida)
+
+
+PASO 8: TOMAR DECISION FINAL
+---------------------------
+
+Condiciones:
+  1. Palabra clave: "abrete" detectada ✓ true
+  2. Distancia: 0.0173 <= 0.35 ✓ true
+
+RESULTADO FINAL: ✓✓ ACCESO OTORGADO A JUAN
+
+
+PASO 9: GUARDAR EN AUDITORÍA
+---------------------------
+
+Insertar en tabla verificaciones de PostgreSQL:
+
+INSERT INTO verificaciones (
+  usuario_identificado,
+  usuario_reclamado,
+  distancia_voz,
+  palabra_detectada,
+  confianza_general,
+  resultado_final,
+  texto_escuchado,
+  palabra_esperada
+) VALUES (
+  'juan',
+  NULL,
+  0.0173,
+  true,
+  0.9865,
+  true,
+  'abre te',
+  'ábrete'
+);
+
+Registro en tabla:
+┌──────────────────┬──────────────────┬──────────────┬──────────────────┬─────────────────┐
+│ usuario_identif. │ distancia_voz    │ palabra_det. │ confianza_general│ resultado_final │
+├──────────────────┼──────────────────┼──────────────┼─────────────────┤─────────────────┤
+│ juan             │ 0.0173           │ true         │ 0.9865           │ true            │
+└──────────────────┴──────────────────┴──────────────┴─────────────────┴─────────────────┘
+
+
+PASO 10: OUTPUT EN CLI
+--------------------
+
+$ python -m voice_auth.cli verificar --palabra-clave "ábrete"
+
+[Grabando 4.0s... Habla ahora.]
+[Grabacion finalizada.]
+
+Pitch muestra: 223.00 Hz
+Texto reconocido: 'abre te'
+Mejor coincidencia: juan (distancia=0.0173, umbral=0.3500)
+
+✓✓ RESULTADO POSITIVO ✓✓
+Usuario identificado: 'juan'
+Confianza general: 98.7%
+
+
+================================================================================
+COMPARACION NUMERICA: REGISTRO vs VERIFICACION
+================================================================================
+
+JUAN - REGISTRO:
+  Vector: [0.7333, 1.0000, 0.5963, 0.3484, 0.2305, 0.1452]
+  Pitch: 220 Hz
+  Almacenado: PostgreSQL
+
+JUAN - VERIFICACION (mismo día, similar condición):
+  Vector: [0.7433, 1.0000, 0.6073, 0.3574, 0.2321, 0.1429]
+  Pitch: 223 Hz
+  Distancia: 0.0173 ✓ Acepta
+
+
+COMPARACION CON INTRUSO:
+  Supongamos un atacante intenta entrar como "juan"
+  
+  Atacante (persona diferente):
+  Vector: [0.6100, 1.0000, 0.4500, 0.2800, 0.1800, 0.0900]
+  Pitch: 180 Hz (voz más grave)
+  
+  Distancia con juan:
+  d = √( (0.7333-0.6100)² + 0 + (0.5963-0.4500)² + (0.3484-0.2800)² + (0.2305-0.1800)² + (0.1452-0.0900)² )
+    = √( 0.01524 + 0.02138 + 0.00469 + 0.00255 + 0.00304 )
+    = √0.06690
+    = 0.259
+  
+  0.259 < 0.35  ← PROBLEMÁTICO (aún aceptaría)
+  
+  Pero si además la palabra clave no se detecta correctamente:
+    palabra_correcta = false
+    
+  RESULTADO: ✗ ACCESO DENEGADO (por palabra clave)
+
+
+================================================================================
+TABLA RESUMEN: FLUJO DE DATOS
+================================================================================
+
+FASE REGISTRO:
+┌─────────────────┬──────────────┬─────────────────────────┐
+│ Etapa           │ Entrada      │ Salida                  │
+├─────────────────┼──────────────┼─────────────────────────┤
+│ Captura         │ 4s audio     │ 64000 muestras          │
+│ Preproc         │ x[n]         │ x2[n] normalizado       │
+│ FFT+Ventana     │ x2[n]        │ M[k] magnitud (32001)   │
+│ Pitch           │ M[80:350]    │ F0 = 220 Hz             │
+│ Armónicos       │ F0           │ 5 armónicos + ampli     │
+│ Relativas       │ Amplitudes   │ r_m normalizadas        │
+│ Vectorización   │ Perfil       │ v ∈ ℝ^6                │
+│ Almacenamiento  │ v            │ JSON en PostgreSQL      │
+└─────────────────┴──────────────┴─────────────────────────┘
+
+FASE VERIFICACION:
+┌─────────────────┬──────────────┬─────────────────────────┐
+│ Etapa           │ Entrada      │ Salida                  │
+├─────────────────┼──────────────┼─────────────────────────┤
+│ Captura         │ 4s audio     │ 64000 muestras          │
+│ Preproc         │ x[n]         │ x2[n] normalizado       │
+│ FFT+Ventana     │ x2[n]        │ M[k] magnitud (32001)   │
+│ Pitch           │ M[80:350]    │ F0 = 223 Hz             │
+│ Armónicos       │ F0           │ 5 armónicos + ampli     │
+│ Relativas       │ Amplitudes   │ r_m normalizadas        │
+│ Vectorización   │ Perfil       │ v_nuevo ∈ ℝ^6          │
+│ Transcripción   │ Audio        │ "abre te"               │
+│ Validar palabra │ Texto        │ palabra_correcta=true   │
+│ Cargar dataset  │ BD           │ {juan: v_registro}      │
+│ Comparar        │ v_nuevo,     │ d = 0.0173              │
+│                 │ {dataset}    │                         │
+│ Decisión        │ d, palabra   │ ACCESO OTORGADO         │
+│ Auditoría       │ Resultados   │ Insertar en BD          │
+└─────────────────┴──────────────┴─────────────────────────┘
+
+
+================================================================================
+TABLAS DE LOOKUP: RANGOS TIPICOS
+================================================================================
+
+PITCH POR VOZ:
+┌──────────────┬────────────────┬─────────────────┐
+│ Tipo de voz  │ Rango F0 (Hz)  │ Promedio        │
+├──────────────┼────────────────┼─────────────────┤
+│ Bajo (hombre)│ 80 - 120       │ 100 Hz          │
+│ Tenor        │ 120 - 180      │ 150 Hz          │
+│ Mujer grave  │ 150 - 200      │ 175 Hz          │
+│ Mujer aguda  │ 200 - 300      │ 250 Hz          │
+│ Niño         │ 250 - 400      │ 325 Hz          │
+└──────────────┴────────────────┴─────────────────┘
+
+AMPLITUDES RELATIVAS TIPICAS:
+┌──────────────┬────────────────┬──────────────┐
+│ Armónico     │ Rango típico   │ Promedio     │
+├──────────────┼────────────────┼──────────────┤
+│ r_1 (fund)   │ 1.0            │ 1.0          │
+│ r_2          │ 0.3 - 0.8      │ 0.55         │
+│ r_3          │ 0.2 - 0.6      │ 0.4          │
+│ r_4          │ 0.1 - 0.4      │ 0.25         │
+│ r_5          │ 0.05 - 0.3     │ 0.15         │
+└──────────────┴────────────────┴──────────────┘
+
+DISTANCIA POR ESCENARIO:
+┌───────────────────────────┬─────────────┐
+│ Escenario                 │ Distancia d │
+├───────────────────────────┼─────────────┤
+│ Misma persona, mismo día  │ 0.01-0.05   │
+│ Misma persona, días apart │ 0.05-0.15   │
+│ Misma persona, emocional  │ 0.10-0.20   │
+│ Personas similares        │ 0.20-0.35   │
+│ Personas diferentes       │ 0.35-1.00   │
+│ Umbral (default)          │ 0.35        │
+└───────────────────────────┴─────────────┘
+
+
+================================================================================
+JSON: ESTRUCTURA DE DATOS EN LA APP
+================================================================================
+
+1. PERFIL ALMACENADO (en PostgreSQL):
+
+{
+  "pitch_hz": 220.0,
+  "armonicos": [
+    {"orden": 1, "frecuencia_hz": 220.0, "amplitud_rel": 1.0000},
+    {"orden": 2, "frecuencia_hz": 440.0, "amplitud_rel": 0.5963},
+    {"orden": 3, "frecuencia_hz": 660.0, "amplitud_rel": 0.3484},
+    {"orden": 4, "frecuencia_hz": 880.0, "amplitud_rel": 0.2305},
+    {"orden": 5, "frecuencia_hz": 1100.0, "amplitud_rel": 0.1452}
+  ]
+}
+
+2. DATASET COMPLETO (cargado en memoria):
+
+{
+  "juan": {
+    "pitch_hz": 220.0,
+    "armonicos": [...]
+  },
+  "maria": {
+    "pitch_hz": 240.0,
+    "armonicos": [...]
+  },
+  "carlos": {
+    "pitch_hz": 185.0,
+    "armonicos": [...]
+  }
+}
+
+3. RESULTADO DE COMPARACION:
+
+{
+  "usuario_identificado": "juan",
+  "distancia": 0.0173,
+  "confianza": 0.9865,
+  "palabra_clave": true,
+  "acceso_permitido": true
+}
+
+4. REGISTRO DE AUDITORIA:
+
+{
+  "usuario_identificado": "juan",
+  "distancia_voz": 0.0173,
+  "palabra_detectada": true,
+  "confianza_general": 0.9865,
+  "resultado_final": true,
+  "texto_escuchado": "abre te",
+  "palabra_esperada": "ábrete",
+  "fecha_verificacion": "2026-05-10T14:32:45Z"
+}
+
+
+================================================================================
+CONCLUSIONES: FLUJO DE DATOS
+================================================================================
+
+El sistema procesa audio en TIEMPO REAL:
+
+Audio (64KB)
+    ↓
+Preprocesa (centrado + normaliza)
+    ↓
+FFT (32001 componentes de frecuencia)
+    ↓
+Detecta Pitch (1 número: F0)
+    ↓
+Detecta Armónicos (5 números: amplitudes relativas)
+    ↓
+Vectoriza (6 números en ℝ^6)
+    ↓
+Calcula Distancia (1 número)
+    ↓
+Verifica Palabra Clave (1 boolean)
+    ↓
+Toma Decisión (ACCESO O RECHAZA)
+    ↓
+Almacena Auditoría (datos en BD)
+
+VENTAJAS DE ESTE FLUJO:
+✓ Rápido (solo 6 números por perfil)
+✓ Robusto (amplitudes relativas, no absolutas)
+✓ Multimodal (voz + palabra clave)
+✓ Auditado (todo se registra)
+✓ Transparente (pasos claros y documentables)
+
+LIMITACIONES:
+✗ Sensible a pitch (emoción, salud)
+✗ Sensible a fonetica (qué se dice)
+✗ Poco seguro (solo 6 características)
+✗ Requiere palabra clave (anti-spoofing)
+✗ Afectado por ruido ambiental
